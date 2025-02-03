@@ -70,7 +70,8 @@ func main() {
 	// получим содержимое файла
 	content, err := os.ReadFile(YAMLFilename)
 	if err != nil {
-		fmt.Errorf("cannot read file content: %w", err)
+		fmt.Printf("cannot read file content: %v", err)
+		return
 	}
 
 	// преобразуем байты из файла в промежуточное синтаксическое представление
@@ -78,7 +79,8 @@ func main() {
 	var root yaml.Node
 	var service Service
 	if err := yaml.Unmarshal(content, &service /*root*/); err != nil {
-		fmt.Errorf("cannot unmarshal file content: %w", err)
+		fmt.Printf("cannot unmarshal file content: %v", err)
+		return
 	}
 
 	// пройдёмся по элементам верхнего уровня и
