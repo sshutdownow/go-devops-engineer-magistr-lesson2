@@ -1,23 +1,21 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 
 	"gopkg.in/yaml.v3"
 )
 
-var YAMLFilename string //= flag.String("YAMLFilename", "", "YAMLFilename to validate")
+var YAMLFilename string
 
 func init() {
-	flag.StringVar(&YAMLFilename, "", "", "YAMLFilename to validate")
-	flag.Usage = func() {
+	if len(os.Args) > 1 {
+		YAMLFilename = os.Args[1]
+	} else {
 		fmt.Printf("Usage: %s validate_me.yaml\n", os.Args[0])
-		flag.PrintDefaults()
 		os.Exit(0)
 	}
-	flag.Parse()
 }
 
 type Service struct {
@@ -70,9 +68,10 @@ func main() {
 	// получим содержимое файла
 	content, err := os.ReadFile(YAMLFilename)
 	if err != nil {
-		fmt.Printf("cannot read file content: %v", err)
+		fmt.Printf("cannot read file '%s' content: %v", YAMLFilename, err)
 		return
 	}
+	//defer file.Close()
 
 	// преобразуем байты из файла в промежуточное синтаксическое представление
 	// с использованием типа `yaml.Node` в качестве целевого объекта
