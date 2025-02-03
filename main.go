@@ -20,25 +20,6 @@ func init() {
 	flag.Parse()
 }
 
-type T struct {
-	APIVersion string `yaml:apiVersion`
-	Kind       string `yaml:kind`
-	Metadata   struct {
-		Name      string `yaml:name`
-		Namespace string `yaml:namespace`
-		Labels    struct {
-			DC    string `yaml:dc`
-			Group string `yaml:group`
-		}
-	}
-	Spec struct {
-		OS         string `yaml:os`
-		Containers struct {
-			Name string `yaml:name`
-		}
-	}
-}
-
 type Service struct {
 	APIVersion string `yaml:"apiVersion"`
 	Kind       string `yaml:"kind"`
