@@ -16,59 +16,6 @@ var (
 	imageDomain    = "registry.bigbrother.io/"
 )
 
-// --- Красивые декларативные структуры с типизированными нодами ---
-
-type Pod struct {
-	APIVersion yaml.Node  `yaml:"apiVersion"`
-	Kind       yaml.Node  `yaml:"kind"`
-	Metadata   Metadata   `yaml:"metadata"`
-	Spec       PodSpec    `yaml:"spec"`
-}
-
-type Metadata struct {
-	Name      yaml.Node         `yaml:"name"`
-	Namespace yaml.Node         `yaml:"namespace"`
-	Labels    map[string]string `yaml:"labels"`
-}
-
-type PodSpec struct {
-	OS         yaml.Node   `yaml:"os"` // Может содержать строку или мапу
-	Containers []Container `yaml:"containers"`
-}
-
-type Container struct {
-	Name           yaml.Node            `yaml:"name"`
-	Image          yaml.Node            `yaml:"image"`
-	Ports          []ContainerPort      `yaml:"ports"`
-	ReadinessProbe *Probe               `yaml:"readinessProbe"`
-	LivenessProbe  *Probe               `yaml:"livenessProbe"`
-	Resources      ResourceRequirements `yaml:"resources"`
-}
-
-type ContainerPort struct {
-	ContainerPort yaml.Node `yaml:"containerPort"`
-	Protocol      yaml.Node `yaml:"protocol"`
-}
-
-type Probe struct {
-	HTTPGet HTTPGetAction `yaml:"httpGet"`
-}
-
-type HTTPGetAction struct {
-	Path yaml.Node `yaml:"path"`
-	Port yaml.Node `yaml:"port"`
-}
-
-type ResourceRequirements struct {
-	Requests ResourceMap `yaml:"requests"`
-	Limits   ResourceMap `yaml:"limits"`
-}
-
-type ResourceMap struct {
-	CPU    yaml.Node `yaml:"cpu"`
-	Memory yaml.Node `yaml:"memory"`
-}
-
 func init() {
 	if len(os.Args) > 1 {
 		YAMLFilename = os.Args[1]
@@ -78,6 +25,50 @@ func init() {
 	}
 }
 
+// Service — Ваша оригинальная структура с вложенными yaml:"..."
+type Service struct {
+	APIVersion string `yaml:"apiVersion"`
+	Kind       string `yaml:"kind"`
+	Metadata   struct {
+		Name      string            `yaml:"name"`
+		Namespace string            `yaml:"namespace"`
+		Labels    map[string]string `yaml:"labels"` // Заменено на map для поддержки любых произвольных меток
+	} `yaml:"metadata"`
+	Spec struct {
+		Os         string `yaml:"os"`
+		Containers []struct {
+			Name  string `yaml:"name"`
+			Image string `yaml:"image"`
+			Ports []struct {
+				ContainerPort int    `yaml:"containerPort"`
+				Protocol      string `yaml:"protocol"`
+			} `yaml:"ports"`
+			ReadinessProbe *struct { // Заменено на указатель, чтобы отличать отсутствие блока от пустых значений
+				HTTPGet struct {
+					Path string `yaml:"path"`
+					Port int    `yaml:"port"`
+				} `yaml:"httpGet"`
+			} `yaml:"readinessProbe"`
+			LivenessProbe *struct { // Заменено на указатель
+				HTTPGet struct {
+					Path string `yaml:"path"`
+					Port int    `yaml:"port"`
+				} `yaml:"httpGet"`
+			} `yaml:"livenessProbe"`
+			Resources struct {
+				Limits struct {
+					CPU    interface{} `yaml:"cpu"` // interface{} позволяет «проглотить» строку и выдать ошибку "cpu must be int"
+					Memory string      `yaml:"memory"`
+				} `yaml:"limits"`
+				Requests struct {
+					CPU    interface{} `yaml:"cpu"` // interface{}
+					Memory string      `yaml:"memory"`
+				} `yaml:"requests"`
+			} `yaml:"resources"`
+		} `yaml:"containers"`
+	} `yaml:"spec"`
+}
+
 func main() {
 	content, err := os.ReadFile(YAMLFilename)
 	if err != nil {
@@ -85,9 +76,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Мапим сразу в красивую структуру Pod
-	var pod Pod
-	if err := yaml.Unmarshal(content, &pod); err != nil {
+	// 1. Декодируем в AST-ноду, чтобы иметь доступ к номерам строк по путям
+	var root yaml.Node
+	if err := yaml.Unmarshal(content, &root); err != nil {
+		fmt.Printf("cannot unmarshal file content: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 2. Декодируем в вашу красивую структуру для проверок бизнес-логики
+	var service Service
+	if err := yaml.Unmarshal(content, &service); err != nil {
 		fmt.Printf("cannot unmarshal file content: %v\n", err)
 		os.Exit(1)
 	}
@@ -96,117 +94,122 @@ func main() {
 	var errors []string
 
 	// 1. Поля верхнего уровня
-	if pod.APIVersion.Value == "" {
-		errors = append(errors, fmt.Sprintf("%s:1 apiVersion is required", baseName))
-	} else if pod.APIVersion.Value != "v1" {
-		errors = append(errors, fmt.Sprintf("%s:%d apiVersion must be v1", baseName, pod.APIVersion.Line))
+	if service.APIVersion == "" {
+		errors = append(errors, fmt.Sprintf("%s:%d apiVersion is required", baseName, findLine(&root, "apiVersion")))
+	} else if service.APIVersion != "v1" {
+		errors = append(errors, fmt.Sprintf("%s:%d apiVersion must be v1", baseName, findLine(&root, "apiVersion")))
 	}
 
-	if pod.Kind.Value == "" {
-		errors = append(errors, fmt.Sprintf("%s:1 kind is required", baseName))
-	} else if pod.Kind.Value != "Pod" {
-		errors = append(errors, fmt.Sprintf("%s:%d kind must be Pod", baseName, pod.Kind.Line))
+	if service.Kind == "" {
+		errors = append(errors, fmt.Sprintf("%s:%d kind is required", baseName, findLine(&root, "kind")))
+	} else if service.Kind != "Pod" {
+		errors = append(errors, fmt.Sprintf("%s:%d kind must be Pod", baseName, findLine(&root, "kind")))
 	}
 
 	// 2. ObjectMeta
-	if pod.Metadata.Name.Value == "" {
-		errors = append(errors, fmt.Sprintf("%s:1 name is required", baseName))
+	if service.Metadata.Name == "" {
+		errors = append(errors, fmt.Sprintf("%s:%d name is required", baseName, findLine(&root, "metadata", "name")))
 	}
 
 	// 3. PodSpec & OS
-	if pod.Spec.OS.Value != "" { // если os задана строкой
-		if pod.Spec.OS.Value != "linux" && pod.Spec.OS.Value != "windows" {
-			errors = append(errors, fmt.Sprintf("%s:%d os has unsupported value '%s'", baseName, pod.Spec.OS.Line, pod.Spec.OS.Value))
-		}
-	} else if pod.Spec.OS.Kind == yaml.MappingNode { // если задана объектом {name: ...}
-		var osObj struct { Name yaml.Node `yaml:"name"` }
-		_ = pod.Spec.OS.Decode(&osObj)
-		if osObj.Name.Value != "linux" && osObj.Name.Value != "windows" {
-			errors = append(errors, fmt.Sprintf("%s:%d os has unsupported value '%s'", baseName, osObj.Name.Line, osObj.Name.Value))
-		}
+	if service.Spec.Os != "" && service.Spec.Os != "linux" && service.Spec.Os != "windows" {
+		errors = append(errors, fmt.Sprintf("%s:%d os has unsupported value '%s'", baseName, findLine(&root, "spec", "os"), service.Spec.Os))
 	}
 
 	// 4. Containers
-	if len(pod.Spec.Containers) == 0 {
-		errors = append(errors, fmt.Sprintf("%s:1 containers is required", baseName))
+	if len(service.Spec.Containers) == 0 {
+		errors = append(errors, fmt.Sprintf("%s:%d containers is required", baseName, findLine(&root, "spec", "containers")))
 	}
 
 	containerNames := make(map[string]bool)
-	for _, c := range pod.Spec.Containers {
+	for i, c := range service.Spec.Containers {
+		cIdx := fmt.Sprintf("[%d]", i)
+
 		// Имя контейнера
-		if c.Name.Value == "" {
-			errors = append(errors, fmt.Sprintf("%s:%d name is required", baseName, c.Name.Line))
+		if c.Name == "" {
+			errors = append(errors, fmt.Sprintf("%s:%d name is required", baseName, findLine(&root, "spec", "containers", cIdx, "name")))
 		} else {
-			if !snakeCaseRegex.MatchString(c.Name.Value) {
-				errors = append(errors, fmt.Sprintf("%s:%d container name must be snake_case", baseName, c.Name.Line))
+			if !snakeCaseRegex.MatchString(c.Name) {
+				errors = append(errors, fmt.Sprintf("%s:%d container name must be snake_case", baseName, findLine(&root, "spec", "containers", cIdx, "name")))
 			}
-			if containerNames[c.Name.Value] {
-				errors = append(errors, fmt.Sprintf("%s:%d duplicate container name", baseName, c.Name.Line))
+			if containerNames[c.Name] {
+				errors = append(errors, fmt.Sprintf("%s:%d duplicate container name", baseName, findLine(&root, "spec", "containers", cIdx, "name")))
 			}
-			containerNames[c.Name.Value] = true
+			containerNames[c.Name] = true
 		}
 
 		// Образ (Image)
-		if c.Image.Value == "" {
-			errors = append(errors, fmt.Sprintf("%s:1 image is required", baseName))
+		if c.Image == "" {
+			errors = append(errors, fmt.Sprintf("%s:%d image is required", baseName, findLine(&root, "spec", "containers", cIdx, "image")))
 		} else {
-			if !strings.HasPrefix(c.Image.Value, imageDomain) {
-				errors = append(errors, fmt.Sprintf("%s:%d image registry must be %s", baseName, c.Image.Line, imageDomain))
+			if !strings.HasPrefix(c.Image, imageDomain) {
+				errors = append(errors, fmt.Sprintf("%s:%d image registry must be %s", baseName, findLine(&root, "spec", "containers", cIdx, "image"), imageDomain))
 			}
-			parts := strings.Split(c.Image.Value, ":")
+			parts := strings.Split(c.Image, ":")
 			if len(parts) < 2 || parts[len(parts)-1] == "" || strings.Contains(parts[len(parts)-1], "/") {
-				errors = append(errors, fmt.Sprintf("%s:%d image tag is required", baseName, c.Image.Line))
+				errors = append(errors, fmt.Sprintf("%s:%d image tag is required", baseName, findLine(&root, "spec", "containers", cIdx, "image")))
 			}
 		}
 
 		// Порты
-		for _, p := range c.Ports {
-			if p.ContainerPort.Value != "" {
-				var portVal int
-				_ = p.ContainerPort.Decode(&portVal)
-				if portVal <= 0 || portVal >= 65536 {
-					errors = append(errors, fmt.Sprintf("%s:%d containerPort value out of range", baseName, p.ContainerPort.Line))
-				}
+		for j, p := range c.Ports {
+			pIdx := fmt.Sprintf("[%d]", j)
+			if p.ContainerPort <= 0 || p.ContainerPort >= 65536 {
+				errors = append(errors, fmt.Sprintf("%s:%d containerPort value out of range", baseName, findLine(&root, "spec", "containers", cIdx, "ports", pIdx, "containerPort")))
 			}
-			if p.Protocol.Value != "" && p.Protocol.Value != "TCP" && p.Protocol.Value != "UDP" {
-				errors = append(errors, fmt.Sprintf("%s:%d protocol must be TCP or UDP", baseName, p.Protocol.Line))
+			if p.Protocol != "" && p.Protocol != "TCP" && p.Protocol != "UDP" {
+				errors = append(errors, fmt.Sprintf("%s:%d protocol must be TCP or UDP", baseName, findLine(&root, "spec", "containers", cIdx, "ports", pIdx, "protocol")))
 			}
 		}
 
-		// Пробы (Probes)
-		probes := map[string]*Probe{"readinessProbe": c.ReadinessProbe, "livenessProbe": c.LivenessProbe}
-		for _, pr := range probes {
-			if pr != nil {
-				hg := pr.HTTPGet
-				if hg.Path.Value != "" && !strings.HasPrefix(hg.Path.Value, "/") {
-					errors = append(errors, fmt.Sprintf("%s:%d path must be absolute", baseName, hg.Path.Line))
-				}
-				if hg.Port.Value != "" {
-					var portVal int
-					_ = hg.Port.Decode(&portVal)
-					if portVal <= 0 || portVal >= 65536 {
-						errors = append(errors, fmt.Sprintf("%s:%d port value out of range", baseName, hg.Port.Line))
-					}
-				}
+		// Проверки Readiness и Liveness Probe
+		if c.ReadinessProbe != nil {
+			hg := c.ReadinessProbe.HTTPGet
+			if hg.Path != "" && !strings.HasPrefix(hg.Path, "/") {
+				errors = append(errors, fmt.Sprintf("%s:%d path must be absolute", baseName, findLine(&root, "spec", "containers", cIdx, "readinessProbe", "httpGet", "path")))
+			}
+			if hg.Port <= 0 || hg.Port >= 65536 {
+				errors = append(errors, fmt.Sprintf("%s:%d port value out of range", baseName, findLine(&root, "spec", "containers", cIdx, "readinessProbe", "httpGet", "port")))
+			}
+		}
+
+		if c.LivenessProbe != nil {
+			hg := c.LivenessProbe.HTTPGet
+			if hg.Path != "" && !strings.HasPrefix(hg.Path, "/") {
+				errors = append(errors, fmt.Sprintf("%s:%d path must be absolute", baseName, findLine(&root, "spec", "containers", cIdx, "livenessProbe", "httpGet", "path")))
+			}
+			if hg.Port <= 0 || hg.Port >= 65536 {
+				errors = append(errors, fmt.Sprintf("%s:%d port value out of range", baseName, findLine(&root, "spec", "containers", cIdx, "livenessProbe", "httpGet", "port")))
 			}
 		}
 
 		// Ресурсы
-		resources := []ResourceMap{c.Resources.Requests, c.Resources.Limits}
-		for _, res := range resources {
-			if res.CPU.Value != "" && res.CPU.ShortTag() != "!!int" {
-				errors = append(errors, fmt.Sprintf("%s:%d cpu must be int", baseName, res.CPU.Line))
+		sections := []string{"requests", "limits"}
+		for _, sec := range sections {
+			var cpuVal interface{}
+			var memVal string
+			if sec == "requests" {
+				cpuVal = c.Resources.Requests.CPU
+				memVal = c.Resources.Requests.Memory
+			} else {
+				cpuVal = c.Resources.Limits.CPU
+				memVal = c.Resources.Limits.Memory
 			}
-			if res.Memory.Value != "" {
-				v := res.Memory.Value
-				if !strings.HasSuffix(v, "Gi") && !strings.HasSuffix(v, "Mi") && !strings.HasSuffix(v, "Ki") {
-					errors = append(errors, fmt.Sprintf("%s:%d memory unit must be Gi, Mi, Ki", baseName, res.Memory.Line))
+
+			if cpuVal != nil {
+				if _, ok := cpuVal.(int); !ok {
+					errors = append(errors, fmt.Sprintf("%s:%d cpu must be int", baseName, findLine(&root, "spec", "containers", cIdx, "resources", sec, "cpu")))
+				}
+			}
+			if memVal != "" {
+				if !strings.HasSuffix(memVal, "Gi") && !strings.HasSuffix(memVal, "Mi") && !strings.HasSuffix(memVal, "Ki") {
+					errors = append(errors, fmt.Sprintf("%s:%d memory unit must be Gi, Mi, Ki", baseName, findLine(&root, "spec", "containers", cIdx, "resources", sec, "memory")))
 				}
 			}
 		}
 	}
 
-	// Вывод ошибок валидации
+	// Выводим все ошибки одной пачкой
 	if len(errors) > 0 {
 		for _, errStr := range errors {
 			fmt.Println(errStr)
@@ -215,4 +218,47 @@ func main() {
 	}
 
 	fmt.Println("OK")
+}
+
+// findLine ищет номер строки в AST по цепочке ключей и индексов массивов
+func findLine(root *yaml.Node, path ...string) int {
+	if len(root.Content) == 0 {
+		return 1
+	}
+	current := root.Content[0]
+
+	for _, segment := range path {
+		if current == nil {
+			return 1
+		}
+
+		if strings.HasPrefix(segment, "[") && strings.HasSuffix(segment, "]") && current.Kind == yaml.SequenceNode {
+			var idx int
+			_, _ = fmt.Sscanf(segment, "[%d]", &idx)
+			if idx >= 0 && idx < len(current.Content) {
+				current = current.Content[idx]
+				continue
+			}
+			return current.Line
+		}
+
+		if current.Kind == yaml.MappingNode {
+			found := false
+			for i := 0; i < len(current.Content); i += 2 {
+				if current.Content[i].Value == segment {
+					current = current.Content[i+1]
+					found = true
+					break
+				}
+			}
+			if !found {
+				return current.Line
+			}
+		}
+	}
+
+	if current != nil {
+		return current.Line
+	}
+	return 1
 }
