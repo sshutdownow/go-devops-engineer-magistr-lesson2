@@ -16,6 +16,59 @@ var (
 	imageDomain    = "registry.bigbrother.io/"
 )
 
+// --- Красивые декларативные структуры с типизированными нодами ---
+
+type Pod struct {
+	APIVersion yaml.Node  `yaml:"apiVersion"`
+	Kind       yaml.Node  `yaml:"kind"`
+	Metadata   Metadata   `yaml:"metadata"`
+	Spec       PodSpec    `yaml:"spec"`
+}
+
+type Metadata struct {
+	Name      yaml.Node         `yaml:"name"`
+	Namespace yaml.Node         `yaml:"namespace"`
+	Labels    map[string]string `yaml:"labels"`
+}
+
+type PodSpec struct {
+	OS         yaml.Node   `yaml:"os"` // Может содержать строку или мапу
+	Containers []Container `yaml:"containers"`
+}
+
+type Container struct {
+	Name           yaml.Node            `yaml:"name"`
+	Image          yaml.Node            `yaml:"image"`
+	Ports          []ContainerPort      `yaml:"ports"`
+	ReadinessProbe *Probe               `yaml:"readinessProbe"`
+	LivenessProbe  *Probe               `yaml:"livenessProbe"`
+	Resources      ResourceRequirements `yaml:"resources"`
+}
+
+type ContainerPort struct {
+	ContainerPort yaml.Node `yaml:"containerPort"`
+	Protocol      yaml.Node `yaml:"protocol"`
+}
+
+type Probe struct {
+	HTTPGet HTTPGetAction `yaml:"httpGet"`
+}
+
+type HTTPGetAction struct {
+	Path yaml.Node `yaml:"path"`
+	Port yaml.Node `yaml:"port"`
+}
+
+type ResourceRequirements struct {
+	Requests ResourceMap `yaml:"requests"`
+	Limits   ResourceMap `yaml:"limits"`
+}
+
+type ResourceMap struct {
+	CPU    yaml.Node `yaml:"cpu"`
+	Memory yaml.Node `yaml:"memory"`
+}
+
 func init() {
 	if len(os.Args) > 1 {
 		YAMLFilename = os.Args[1]
@@ -32,196 +85,128 @@ func main() {
 		os.Exit(1)
 	}
 
-	var root yaml.Node
-	if err := yaml.Unmarshal(content, &root); err != nil {
+	// Мапим сразу в красивую структуру Pod
+	var pod Pod
+	if err := yaml.Unmarshal(content, &pod); err != nil {
 		fmt.Printf("cannot unmarshal file content: %v\n", err)
-		os.Exit(1)
-	}
-
-	if len(root.Content) == 0 {
-		fmt.Println("empty yaml document")
 		os.Exit(1)
 	}
 
 	baseName := filepath.Base(YAMLFilename)
 	var errors []string
 
-	podNode := root.Content[0]
-	if podNode.Kind != yaml.MappingNode {
-		fmt.Println("root element must be a map")
-		os.Exit(1)
-	}
-
-	fields := getMapFields(podNode)
-
 	// 1. Поля верхнего уровня
-	if node, ok := fields["apiVersion"]; !ok {
-		errors = append(errors, fmt.Sprintf("%s:%d apiVersion is required", baseName, podNode.Line))
-	} else if node.Value != "v1" {
-		errors = append(errors, fmt.Sprintf("%s:%d apiVersion must be v1", baseName, node.Line))
+	if pod.APIVersion.Value == "" {
+		errors = append(errors, fmt.Sprintf("%s:1 apiVersion is required", baseName))
+	} else if pod.APIVersion.Value != "v1" {
+		errors = append(errors, fmt.Sprintf("%s:%d apiVersion must be v1", baseName, pod.APIVersion.Line))
 	}
 
-	if node, ok := fields["kind"]; !ok {
-		errors = append(errors, fmt.Sprintf("%s:%d kind is required", baseName, podNode.Line))
-	} else if node.Value != "Pod" {
-		errors = append(errors, fmt.Sprintf("%s:%d kind must be Pod", baseName, node.Line))
+	if pod.Kind.Value == "" {
+		errors = append(errors, fmt.Sprintf("%s:1 kind is required", baseName))
+	} else if pod.Kind.Value != "Pod" {
+		errors = append(errors, fmt.Sprintf("%s:%d kind must be Pod", baseName, pod.Kind.Line))
 	}
 
 	// 2. ObjectMeta
-	var metadataFields map[string]*yaml.Node
-	if node, ok := fields["metadata"]; !ok {
-		errors = append(errors, fmt.Sprintf("%s:%d metadata is required", baseName, podNode.Line))
-	} else if node.Kind == yaml.MappingNode {
-		metadataFields = getMapFields(node)
-		if nameNode, ok := metadataFields["name"]; !ok || strings.TrimSpace(nameNode.Value) == "" {
-			line := node.Line
-			if ok {
-				line = nameNode.Line
-			}
-			errors = append(errors, fmt.Sprintf("%s:%d name is required", baseName, line))
+	if pod.Metadata.Name.Value == "" {
+		errors = append(errors, fmt.Sprintf("%s:1 name is required", baseName))
+	}
+
+	// 3. PodSpec & OS
+	if pod.Spec.OS.Value != "" { // если os задана строкой
+		if pod.Spec.OS.Value != "linux" && pod.Spec.OS.Value != "windows" {
+			errors = append(errors, fmt.Sprintf("%s:%d os has unsupported value '%s'", baseName, pod.Spec.OS.Line, pod.Spec.OS.Value))
+		}
+	} else if pod.Spec.OS.Kind == yaml.MappingNode { // если задана объектом {name: ...}
+		var osObj struct { Name yaml.Node `yaml:"name"` }
+		_ = pod.Spec.OS.Decode(&osObj)
+		if osObj.Name.Value != "linux" && osObj.Name.Value != "windows" {
+			errors = append(errors, fmt.Sprintf("%s:%d os has unsupported value '%s'", baseName, osObj.Name.Line, osObj.Name.Value))
 		}
 	}
 
-	// 3. PodSpec
-	if node, ok := fields["spec"]; !ok {
-		errors = append(errors, fmt.Sprintf("%s:%d spec is required", baseName, podNode.Line))
-	} else if node.Kind == yaml.MappingNode {
-		specFields := getMapFields(node)
+	// 4. Containers
+	if len(pod.Spec.Containers) == 0 {
+		errors = append(errors, fmt.Sprintf("%s:1 containers is required", baseName))
+	}
 
-		// Валидация OS
-		if osNode, ok := specFields["os"]; ok {
-			if osNode.Kind == yaml.ScalarNode {
-				if osNode.Value != "linux" && osNode.Value != "windows" {
-					errors = append(errors, fmt.Sprintf("%s:%d os has unsupported value '%s'", baseName, osNode.Line, osNode.Value))
+	containerNames := make(map[string]bool)
+	for _, c := range pod.Spec.Containers {
+		// Имя контейнера
+		if c.Name.Value == "" {
+			errors = append(errors, fmt.Sprintf("%s:%d name is required", baseName, c.Name.Line))
+		} else {
+			if !snakeCaseRegex.MatchString(c.Name.Value) {
+				errors = append(errors, fmt.Sprintf("%s:%d container name must be snake_case", baseName, c.Name.Line))
+			}
+			if containerNames[c.Name.Value] {
+				errors = append(errors, fmt.Sprintf("%s:%d duplicate container name", baseName, c.Name.Line))
+			}
+			containerNames[c.Name.Value] = true
+		}
+
+		// Образ (Image)
+		if c.Image.Value == "" {
+			errors = append(errors, fmt.Sprintf("%s:1 image is required", baseName))
+		} else {
+			if !strings.HasPrefix(c.Image.Value, imageDomain) {
+				errors = append(errors, fmt.Sprintf("%s:%d image registry must be %s", baseName, c.Image.Line, imageDomain))
+			}
+			parts := strings.Split(c.Image.Value, ":")
+			if len(parts) < 2 || parts[len(parts)-1] == "" || strings.Contains(parts[len(parts)-1], "/") {
+				errors = append(errors, fmt.Sprintf("%s:%d image tag is required", baseName, c.Image.Line))
+			}
+		}
+
+		// Порты
+		for _, p := range c.Ports {
+			if p.ContainerPort.Value != "" {
+				var portVal int
+				_ = p.ContainerPort.Decode(&portVal)
+				if portVal <= 0 || portVal >= 65536 {
+					errors = append(errors, fmt.Sprintf("%s:%d containerPort value out of range", baseName, p.ContainerPort.Line))
 				}
-			} else if osNode.Kind == yaml.MappingNode {
-				osFields := getMapFields(osNode)
-				if nameNode, ok := osFields["name"]; !ok || (nameNode.Value != "linux" && nameNode.Value != "windows") {
-					line := osNode.Line
-					val := ""
-					if ok {
-						line = nameNode.Line
-						val = nameNode.Value
+			}
+			if p.Protocol.Value != "" && p.Protocol.Value != "TCP" && p.Protocol.Value != "UDP" {
+				errors = append(errors, fmt.Sprintf("%s:%d protocol must be TCP or UDP", baseName, p.Protocol.Line))
+			}
+		}
+
+		// Пробы (Probes)
+		probes := map[string]*Probe{"readinessProbe": c.ReadinessProbe, "livenessProbe": c.LivenessProbe}
+		for _, pr := range probes {
+			if pr != nil {
+				hg := pr.HTTPGet
+				if hg.Path.Value != "" && !strings.HasPrefix(hg.Path.Value, "/") {
+					errors = append(errors, fmt.Sprintf("%s:%d path must be absolute", baseName, hg.Path.Line))
+				}
+				if hg.Port.Value != "" {
+					var portVal int
+					_ = hg.Port.Decode(&portVal)
+					if portVal <= 0 || portVal >= 65536 {
+						errors = append(errors, fmt.Sprintf("%s:%d port value out of range", baseName, hg.Port.Line))
 					}
-					errors = append(errors, fmt.Sprintf("%s:%d os has unsupported value '%s'", baseName, line, val))
 				}
 			}
 		}
 
-		// Валидация Containers
-		if containersNode, ok := specFields["containers"]; !ok || len(containersNode.Content) == 0 {
-			errors = append(errors, fmt.Sprintf("%s:%d containers is required", baseName, node.Line))
-		} else if containersNode.Kind == yaml.SequenceNode {
-			containerNames := make(map[string]bool)
-
-			for _, containerNode := range containersNode.Content {
-				if containerNode.Kind != yaml.MappingNode {
-					continue
-				}
-				cFields := getMapFields(containerNode)
-
-				nameNode, hasName := cFields["name"]
-				if !hasName || strings.TrimSpace(nameNode.Value) == "" {
-					line := containerNode.Line
-					if hasName {
-						line = nameNode.Line
-					}
-					errors = append(errors, fmt.Sprintf("%s:%d name is required", baseName, line))
-				} else {
-					if !snakeCaseRegex.MatchString(nameNode.Value) {
-						errors = append(errors, fmt.Sprintf("%s:%d container name must be snake_case", baseName, nameNode.Line))
-					}
-					if containerNames[nameNode.Value] {
-						errors = append(errors, fmt.Sprintf("%s:%d duplicate container name", baseName, nameNode.Line))
-					}
-					containerNames[nameNode.Value] = true
-				}
-
-				imageNode, hasImage := cFields["image"]
-				if !hasImage || strings.TrimSpace(imageNode.Value) == "" {
-					errors = append(errors, fmt.Sprintf("%s:%d image is required", baseName, containerNode.Line))
-				} else {
-					if !strings.HasPrefix(imageNode.Value, imageDomain) {
-						errors = append(errors, fmt.Sprintf("%s:%d image registry must be %s", baseName, imageNode.Line, imageDomain))
-					}
-					parts := strings.Split(imageNode.Value, ":")
-					if len(parts) < 2 || parts[len(parts)-1] == "" || strings.Contains(parts[len(parts)-1], "/") {
-						errors = append(errors, fmt.Sprintf("%s:%d image tag is required", baseName, imageNode.Line))
-					}
-				}
-
-				// Порты
-				if portsNode, ok := cFields["ports"]; ok && portsNode.Kind == yaml.SequenceNode {
-					for _, portNode := range portsNode.Content {
-						if portNode.Kind != yaml.MappingNode {
-							continue
-						}
-						pFields := getMapFields(portNode)
-						if cpNode, ok := pFields["containerPort"]; ok {
-							var p int
-							if err := cpNode.Decode(&p); err == nil {
-								if p <= 0 || p >= 65536 {
-									errors = append(errors, fmt.Sprintf("%s:%d port out of range", baseName, cpNode.Line))
-								}
-							}
-						}
-						if protoNode, ok := pFields["protocol"]; ok {
-							if protoNode.Value != "TCP" && protoNode.Value != "UDP" {
-								errors = append(errors, fmt.Sprintf("%s:%d protocol must be TCP or UDP", baseName, protoNode.Line))
-							}
-						}
-					}
-				}
-
-				// Проверки Readiness и Liveness Probe
-				for _, probeName := range []string{"readinessProbe", "livenessProbe"} {
-					if probeNode, ok := cFields[probeName]; ok && probeNode.Kind == yaml.MappingNode {
-						prFields := getMapFields(probeNode)
-						if hgNode, ok := prFields["httpGet"]; ok && hgNode.Kind == yaml.MappingNode {
-							hgFields := getMapFields(hgNode)
-							if pathNode, ok := hgFields["path"]; ok {
-								if !strings.HasPrefix(pathNode.Value, "/") {
-									errors = append(errors, fmt.Sprintf("%s:%d path must be absolute", baseName, pathNode.Line))
-								}
-							}
-							if pNode, ok := hgFields["port"]; ok {
-								var p int
-								if err := pNode.Decode(&p); err == nil {
-									if p <= 0 || p >= 65536 {
-										errors = append(errors, fmt.Sprintf("%s:%d port out of range", baseName, pNode.Line))
-									}
-								}
-							}
-						}
-					}
-				}
-
-				// Ресурсы
-				if resNode, ok := cFields["resources"]; !ok {
-					errors = append(errors, fmt.Sprintf("%s:%d resources is required", baseName, containerNode.Line))
-				} else if resNode.Kind == yaml.MappingNode {
-					resFields := getMapFields(resNode)
-					for _, section := range []string{"requests", "limits"} {
-						if secNode, ok := resFields[section]; ok && secNode.Kind == yaml.MappingNode {
-							secFields := getMapFields(secNode)
-							if cpuNode, ok := secFields["cpu"]; ok {
-								if cpuNode.ShortTag() != "!!int" {
-									errors = append(errors, fmt.Sprintf("%s:%d cpu must be int", baseName, cpuNode.Line))
-								}
-							}
-							if memNode, ok := secFields["memory"]; ok {
-								v := memNode.Value
-								if !strings.HasSuffix(v, "Gi") && !strings.HasSuffix(v, "Mi") && !strings.HasSuffix(v, "Ki") {
-									errors = append(errors, fmt.Sprintf("%s:%d memory unit must be Gi, Mi, Ki", baseName, memNode.Line))
-								}
-							}
-						}
-					}
+		// Ресурсы
+		resources := []ResourceMap{c.Resources.Requests, c.Resources.Limits}
+		for _, res := range resources {
+			if res.CPU.Value != "" && res.CPU.ShortTag() != "!!int" {
+				errors = append(errors, fmt.Sprintf("%s:%d cpu must be int", baseName, res.CPU.Line))
+			}
+			if res.Memory.Value != "" {
+				v := res.Memory.Value
+				if !strings.HasSuffix(v, "Gi") && !strings.HasSuffix(v, "Mi") && !strings.HasSuffix(v, "Ki") {
+					errors = append(errors, fmt.Sprintf("%s:%d memory unit must be Gi, Mi, Ki", baseName, res.Memory.Line))
 				}
 			}
 		}
 	}
 
+	// Вывод ошибок валидации
 	if len(errors) > 0 {
 		for _, errStr := range errors {
 			fmt.Println(errStr)
@@ -230,15 +215,4 @@ func main() {
 	}
 
 	fmt.Println("OK")
-}
-
-func getMapFields(node *yaml.Node) map[string]*yaml.Node {
-	fields := make(map[string]*yaml.Node)
-	if node.Kind != yaml.MappingNode {
-		return fields
-	}
-	for i := 0; i < len(node.Content); i += 2 {
-		fields[node.Content[i].Value] = node.Content[i+1]
-	}
-	return fields
 }
