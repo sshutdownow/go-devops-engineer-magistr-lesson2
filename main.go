@@ -18,9 +18,9 @@ var (
 
 func init() {
 	if len(os.Args) > 1 {
-		YAMLFilename = os.Args
+		YAMLFilename = os.Args[1]
 	} else {
-		fmt.Printf("Usage: %s validate_me.yaml\n", os.Args)
+		fmt.Printf("Usage: %s validate_me.yaml\n", os.Args[0])
 		os.Exit(1)
 	}
 }
@@ -46,7 +46,7 @@ func main() {
 	baseName := filepath.Base(YAMLFilename)
 	var errors []string
 
-	podNode := root.Content
+	podNode := root.Content[0]
 	if podNode.Kind != yaml.MappingNode {
 		fmt.Println("root element must be a map")
 		os.Exit(1)
