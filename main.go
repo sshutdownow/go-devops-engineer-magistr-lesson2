@@ -108,17 +108,25 @@ func main() {
 }
 
 func validateTopLevelFields(root *yaml.Node) error {
-	if len(root.Content) == 0 || root.Content.Kind != yaml.DocumentNode {
+	// root.Content содержит список документов в YAML файле
+	if len(root.Content) == 0 || root.Content[0].Kind != yaml.DocumentNode {
 		return fmt.Errorf("неверный формат YAML документа")
 	}
-	docMapping := root.Content.Content
-	if docMapping.Kind != yaml.MappingNode {
+
+	docNode := root.Content[0]
+	// docNode.Content[0] содержит корневой MappingNode для структуры Pod
+	if len(docNode.Content) == 0 || docNode.Content[0].Kind != yaml.MappingNode {
 		return fmt.Errorf("корневой элемент должен быть объектом (map)")
 	}
+
+	docMapping := docNode.Content[0]
 	foundFields := make(map[string]bool)
+	
+	// В MappingNode элементы идут парами: Ключ (i) -> Значение (i+1)
 	for i := 0; i < len(docMapping.Content); i += 2 {
 		foundFields[docMapping.Content[i].Value] = true
 	}
+
 	required := []string{"apiVersion", "kind", "metadata", "spec"}
 	for _, field := range required {
 		if !foundFields[field] {
