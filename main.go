@@ -18,14 +18,14 @@ var (
 
 func init() {
 	if len(os.Args) > 1 {
-		YAMLFilename = os.Args
+		YAMLFilename = os.Args[1] // Исправлено: берем первый переданный аргумент
 	} else {
-		fmt.Printf("Usage: %s validate_me.yaml\n", os.Args)
+		fmt.Printf("Usage: %s validate_me.yaml\n", os.Args[0])
 		os.Exit(1)
 	}
 }
 
-// Service — структура с вложенными yaml:"..."
+// Service — Ваша оригинальная структура с вложенными yaml:"..."
 type Service struct {
 	APIVersion string `yaml:"apiVersion"`
 	Kind       string `yaml:"kind"`
@@ -155,7 +155,7 @@ func main() {
 			}
 		}
 
-		// Валидация Readiness и Liveness Probe без хаков рефлексии
+		// Валидация Readiness и Liveness Probe
 		if c.ReadinessProbe != nil {
 			validateProbe(v, cIdx, "readinessProbe", c.ReadinessProbe.HTTPGet.Path, c.ReadinessProbe.HTTPGet.Port)
 		}
@@ -196,7 +196,6 @@ func main() {
 	fmt.Println("OK")
 }
 
-// Чистая изолированная функция для проверки параметров Probe
 func validateProbe(v *Validator, cIdx, probeName, path string, port int) {
 	if path != "" && !strings.HasPrefix(path, "/") {
 		v.AddErr("path must be absolute", "spec", "containers", cIdx, probeName, "httpGet", "path")
@@ -206,7 +205,7 @@ func validateProbe(v *Validator, cIdx, probeName, path string, port int) {
 	}
 }
 
-// --- Умный хелпер-валидатор ---
+// --- Умный хелпер-валидатор (Исправлен обход AST) ---
 
 type Validator struct {
 	root     *yaml.Node
@@ -220,37 +219,46 @@ func NewValidator(root *yaml.Node, baseName string) *Validator {
 
 func (v *Validator) AddErr(msg string, path ...string) {
 	line := 1
-	if len(v.root.Content) > 0 {
-		current := v.root.Content
-		for _, segment := range path {
-			if current == nil {
-				break
+	current := v.root
+
+	// Если это DocumentNode, сразу спускаемся к корневому элементу содержимого
+	if current.Kind == yaml.DocumentNode && len(current.Content) > 0 {
+		current = current.Content[0]
+	}
+
+	for _, segment := range path {
+		if current == nil {
+			break
+		}
+
+		// Поиск индекса в SequenceNode (массиве)
+		if strings.HasPrefix(segment, "[") && strings.HasSuffix(segment, "]") && current.Kind == yaml.SequenceNode {
+			var idx int
+			_, _ = fmt.Sscanf(segment, "[%d]", &idx)
+			if idx >= 0 && idx < len(current.Content) {
+				current = current.Content[idx]
+				continue
 			}
-			if strings.HasPrefix(segment, "[") && strings.HasSuffix(segment, "]") && current.Kind == yaml.SequenceNode {
-				var idx int
-				_, _ = fmt.Sscanf(segment, "[%d]", &idx)
-				if idx >= 0 && idx < len(current.Content) {
-					current = current.Content[idx]
-					continue
-				}
-			}
-			if current.Kind == yaml.MappingNode {
-				found := false
-				for i := 0; i < len(current.Content); i += 2 {
-					if current.Content[i].Value == segment {
-						current = current.Content[i+1]
-						found = true
-						break
-					}
-				}
-				if !found {
+		}
+
+		// Поиск ключа в MappingNode (объекте)
+		if current.Kind == yaml.MappingNode {
+			found := false
+			for i := 0; i < len(current.Content); i += 2 {
+				if current.Content[i].Value == segment {
+					current = current.Content[i+1]
+					found = true
 					break
 				}
 			}
+			if !found {
+				break
+			}
 		}
-		if current != nil {
-			line = current.Line
-		}
+	}
+
+	if current != nil {
+		line = current.Line
 	}
 	v.errors = append(v.errors, fmt.Sprintf("%s:%d %s", v.baseName, line, msg))
 }
