@@ -18,9 +18,9 @@ var (
 
 func init() {
 	if len(os.Args) > 1 {
-		YAMLFilename = os.Args[1]
+		YAMLFilename = os.Args
 	} else {
-		fmt.Printf("Usage: %s validate_me.yaml\n", os.Args[0])
+		fmt.Printf("Usage: %s validate_me.yaml\n", os.Args)
 		os.Exit(1)
 	}
 }
@@ -38,7 +38,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Если файл пустой
 	if len(root.Content) == 0 {
 		fmt.Println("empty yaml document")
 		os.Exit(1)
@@ -47,14 +46,12 @@ func main() {
 	baseName := filepath.Base(YAMLFilename)
 	var errors []string
 
-	// Корневой MappingNode документа
-	podNode := root.Content[0]
+	podNode := root.Content
 	if podNode.Kind != yaml.MappingNode {
 		fmt.Println("root element must be a map")
 		os.Exit(1)
 	}
 
-	// Переводим map в удобный вид для поиска нод по ключам
 	fields := getMapFields(podNode)
 
 	// 1. Поля верхнего уровня
@@ -95,16 +92,18 @@ func main() {
 		if osNode, ok := specFields["os"]; ok {
 			if osNode.Kind == yaml.ScalarNode {
 				if osNode.Value != "linux" && osNode.Value != "windows" {
-					errors = append(errors, fmt.Sprintf("%s:%d os must be linux or windows", baseName, osNode.Line))
+					errors = append(errors, fmt.Sprintf("%s:%d os has unsupported value '%s'", baseName, osNode.Line, osNode.Value))
 				}
 			} else if osNode.Kind == yaml.MappingNode {
 				osFields := getMapFields(osNode)
 				if nameNode, ok := osFields["name"]; !ok || (nameNode.Value != "linux" && nameNode.Value != "windows") {
 					line := osNode.Line
+					val := ""
 					if ok {
 						line = nameNode.Line
+						val = nameNode.Value
 					}
-					errors = append(errors, fmt.Sprintf("%s:%d os must be linux or windows", baseName, line))
+					errors = append(errors, fmt.Sprintf("%s:%d os has unsupported value '%s'", baseName, line, val))
 				}
 			}
 		}
@@ -121,7 +120,6 @@ func main() {
 				}
 				cFields := getMapFields(containerNode)
 
-				// Имя контейнера (В ТЗ: обязательно, уникально, snake_case)
 				nameNode, hasName := cFields["name"]
 				if !hasName || strings.TrimSpace(nameNode.Value) == "" {
 					line := containerNode.Line
@@ -139,7 +137,6 @@ func main() {
 					containerNames[nameNode.Value] = true
 				}
 
-				// Образ контейнера (В ТЗ: обязательно, домен registry.bigbrother.io, наличие тега)
 				imageNode, hasImage := cFields["image"]
 				if !hasImage || strings.TrimSpace(imageNode.Value) == "" {
 					errors = append(errors, fmt.Sprintf("%s:%d image is required", baseName, containerNode.Line))
@@ -207,6 +204,11 @@ func main() {
 					for _, section := range []string{"requests", "limits"} {
 						if secNode, ok := resFields[section]; ok && secNode.Kind == yaml.MappingNode {
 							secFields := getMapFields(secNode)
+							if cpuNode, ok := secFields["cpu"]; ok {
+								if cpuNode.ShortTag() != "!!int" {
+									errors = append(errors, fmt.Sprintf("%s:%d cpu must be int", baseName, cpuNode.Line))
+								}
+							}
 							if memNode, ok := secFields["memory"]; ok {
 								v := memNode.Value
 								if !strings.HasSuffix(v, "Gi") && !strings.HasSuffix(v, "Mi") && !strings.HasSuffix(v, "Ki") {
@@ -220,7 +222,6 @@ func main() {
 		}
 	}
 
-	// выводим ошибки пачкой
 	if len(errors) > 0 {
 		for _, errStr := range errors {
 			fmt.Println(errStr)
@@ -231,7 +232,6 @@ func main() {
 	fmt.Println("OK")
 }
 
-// Помощник для преобразования MappingNode в Go-карту указателей нод
 func getMapFields(node *yaml.Node) map[string]*yaml.Node {
 	fields := make(map[string]*yaml.Node)
 	if node.Kind != yaml.MappingNode {
